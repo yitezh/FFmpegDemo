@@ -1,155 +1,147 @@
 import UIKit
 import AVFoundation
-import CoreVideo
+
+// 你需要确保 Bridging-Header 已经引入 FFmpeg：
+/*
+ #include "libavformat/avformat.h"
+ #include "libavcodec/avcodec.h"
+ #include "libswscale/swscale.h"
+ #include "libavutil/imgutils.h"
+*/
 
 class FFmpegPlayerViewController: UIViewController {
-
-    // 用于显示视频
-    var displayLayer: AVSampleBufferDisplayLayer!
-
-    // 音频播放
-    var audioEngine: AVAudioEngine!
-    var audioPlayerNode: AVAudioPlayerNode!
-    var audioFormat: AVAudioFormat!
-
-    // m3u8 链接
-    let urlString = "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8"
-
+    
+    var urlString: String!
+    var displayView: UIImageView!
+    
     override func viewDidLoad() {
         super.viewDidLoad()
-
         view.backgroundColor = .black
-        setupDisplayLayer()
-        setupAudioEngine()
-
-        // 异步播放
-        DispatchQueue.global(qos: .userInitiated).async {
-            self.playM3U8()
+        
+        displayView = UIImageView(frame: view.bounds)
+        displayView.contentMode = .scaleAspectFit
+        view.addSubview(displayView)
+        
+        DispatchQueue.global().async {
+            self.playM3U8(urlString: self.urlString)
         }
     }
-
-    func setupDisplayLayer() {
-        displayLayer = AVSampleBufferDisplayLayer()
-        displayLayer.videoGravity = .resizeAspect
-        displayLayer.frame = view.bounds
-        view.layer.addSublayer(displayLayer)
-    }
-
-    func setupAudioEngine() {
-        audioEngine = AVAudioEngine()
-        audioPlayerNode = AVAudioPlayerNode()
-        audioEngine.attach(audioPlayerNode)
-
-        let sampleRate: Double = 44100
-        let channels: AVAudioChannelCount = 2
-        audioFormat = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: channels)
-        audioEngine.connect(audioPlayerNode, to: audioEngine.mainMixerNode, format: audioFormat)
-
-        try? audioEngine.start()
-        audioPlayerNode.play()
-    }
-
-    func playM3U8() {
+    
+    func playM3U8(urlString: String) {
         avformat_network_init()
         defer { avformat_network_deinit() }
-
-        guard let urlC = strdup(urlString) else { return }
+        
+        // 打开输入
         var fmtCtx: UnsafeMutablePointer<AVFormatContext>? = avformat_alloc_context()
-        guard avformat_open_input(&fmtCtx, urlC, nil, nil) >= 0,
-              avformat_find_stream_info(fmtCtx, nil) >= 0 else {
-            print("Failed to open m3u8")
+        guard avformat_open_input(&fmtCtx, urlString, nil, nil) >= 0 else {
+            print("Cannot open input")
             return
         }
-
-        // 找视频和音频流
+        guard avformat_find_stream_info(fmtCtx, nil) >= 0 else {
+            print("Cannot find stream info")
+            return
+        }
+        
+        // 找视频流
         var videoStreamIndex: Int32 = -1
-        var audioStreamIndex: Int32 = -1
         for i in 0..<fmtCtx!.pointee.nb_streams {
-            let st = fmtCtx!.pointee.streams[Int(i)]!
-            switch st.pointee.codecpar.pointee.codec_type {
-            case AVMEDIA_TYPE_VIDEO:
-                videoStreamIndex = i
-            case AVMEDIA_TYPE_AUDIO:
-                audioStreamIndex = i
-            default: break
+            guard let stream = fmtCtx!.pointee.streams[Int(i)],
+                  let codecpar = stream.pointee.codecpar else { continue }
+            if codecpar.pointee.codec_type == AVMEDIA_TYPE_VIDEO {
+                videoStreamIndex = Int32(i)
+                break
             }
         }
-
+        guard videoStreamIndex >= 0 else {
+            print("No video stream")
+            return
+        }
+        
         // 视频解码器
-        let videoCodecPar = fmtCtx!.pointee.streams[Int(videoStreamIndex)]!.pointee.codecpar
-        guard let videoCodec = avcodec_find_decoder(videoCodecPar.pointee.codec_id) else { return }
-        let videoCodecCtx = avcodec_alloc_context3(videoCodec)
+        guard let videoStream = fmtCtx!.pointee.streams[Int(videoStreamIndex)],
+              let videoCodecPar = videoStream.pointee.codecpar else { return }
+        let codecID = videoCodecPar.pointee.codec_id
+        guard let videoCodec = avcodec_find_decoder(codecID) else { return }
+        
+        var videoCodecCtx = avcodec_alloc_context3(videoCodec)
         avcodec_parameters_to_context(videoCodecCtx, videoCodecPar)
         avcodec_open2(videoCodecCtx, videoCodec, nil)
-
-        // 音频解码器
-        let audioCodecPar = fmtCtx!.pointee.streams[Int(audioStreamIndex)]!.pointee.codecpar
-        guard let audioCodec = avcodec_find_decoder(audioCodecPar.pointee.codec_id) else { return }
-        let audioCodecCtx = avcodec_alloc_context3(audioCodec)
-        avcodec_parameters_to_context(audioCodecCtx, audioCodecPar)
-        avcodec_open2(audioCodecCtx, audioCodec, nil)
-
-        // 帧和包
-        let frame = av_frame_alloc()
-        let pkt = av_packet_alloc()
-
-        // 视频缩放上下文 RGBA
-        var swsCtx: OpaquePointer? = sws_getContext(
-            videoCodecCtx!.pointee.width,
-            videoCodecCtx!.pointee.height,
-            videoCodecCtx!.pointee.pix_fmt,
-            videoCodecCtx!.pointee.width,
-            videoCodecCtx!.pointee.height,
-            AV_PIX_FMT_RGBA,
-            SWS_BILINEAR,
-            nil, nil, nil)
-
+        
+        // sws scale
         let videoWidth = Int(videoCodecCtx!.pointee.width)
         let videoHeight = Int(videoCodecCtx!.pointee.height)
+        let swsCtx = sws_getContext(videoCodecCtx!.pointee.width,
+                                    videoCodecCtx!.pointee.height,
+                                    videoCodecCtx!.pointee.pix_fmt,
+                                    videoCodecCtx!.pointee.width,
+                                    videoCodecCtx!.pointee.height,
+                                    AV_PIX_FMT_RGBA,
+                                    SWS_BILINEAR,
+                                    nil, nil, nil)
+        
         let bufferSize = av_image_get_buffer_size(AV_PIX_FMT_RGBA, Int32(videoWidth), Int32(videoHeight), 1)
-        let videoBuffer = UnsafeMutablePointer<UInt8>.allocate(capacity: Int(bufferSize))
-        var dstData: [UnsafeMutablePointer<UInt8>?] = [videoBuffer, nil, nil, nil]
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: Int(bufferSize))
+        var dstData: [UnsafeMutablePointer<UInt8>?] = [buffer, nil, nil, nil]
         var dstLinesize: [Int32] = [Int32(videoWidth * 4), 0, 0, 0]
-
-        while av_read_frame(fmtCtx, pkt) >= 0 {
-            if pkt!.pointee.stream_index == videoStreamIndex {
-                avcodec_send_packet(videoCodecCtx, pkt)
+        
+        var frame = av_frame_alloc()
+        var packet = av_packet_alloc()
+        
+        while av_read_frame(fmtCtx, packet) >= 0 {
+            if packet!.pointee.stream_index == videoStreamIndex {
+                avcodec_send_packet(videoCodecCtx, packet)
                 while avcodec_receive_frame(videoCodecCtx, frame) == 0 {
+                    // frame data tuple -> array
+                    var srcData: [UnsafePointer<UInt8>?] = [
+                        frame!.pointee.data.0.map { UnsafePointer($0) },
+                        frame!.pointee.data.1.map { UnsafePointer($0) },
+                        frame!.pointee.data.2.map { UnsafePointer($0) },
+                        frame!.pointee.data.3.map { UnsafePointer($0) },
+                        frame!.pointee.data.4.map { UnsafePointer($0) },
+                        frame!.pointee.data.5.map { UnsafePointer($0) },
+                        frame!.pointee.data.6.map { UnsafePointer($0) },
+                        frame!.pointee.data.7.map { UnsafePointer($0) }
+                    ]
+
+                    var srcLinesize: [Int32] = [
+                        frame!.pointee.linesize.0, frame!.pointee.linesize.1, frame!.pointee.linesize.2, frame!.pointee.linesize.3,
+                        frame!.pointee.linesize.4, frame!.pointee.linesize.5, frame!.pointee.linesize.6, frame!.pointee.linesize.7
+                    ]
+                    
                     sws_scale(swsCtx,
-                              frame!.pointee.data,
-                              frame!.pointee.linesize,
+                              srcData,
+                              srcLinesize,
                               0,
                               videoCodecCtx!.pointee.height,
-                              &dstData,
-                              &dstLinesize)
-
-                    // 显示视频
-                    DispatchQueue.main.async {
-                        // TODO: 这里可以用 CVPixelBuffer + CMSampleBuffer + displayLayer
-                        // 简化示意：你可以封装 dstData 为 CVPixelBuffer 并 append 到 displayLayer
+                              dstData,
+                              dstLinesize)
+                    
+                    // RGBA -> UIImage
+                    let colorSpace = CGColorSpaceCreateDeviceRGB()
+                    if let context = CGContext(data: buffer,
+                                               width: videoWidth,
+                                               height: videoHeight,
+                                               bitsPerComponent: 8,
+                                               bytesPerRow: Int(dstLinesize[0]),
+                                               space: colorSpace,
+                                               bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue),
+                       let cgImage = context.makeImage() {
+                        let image = UIImage(cgImage: cgImage)
+                        DispatchQueue.main.async {
+                            self.displayView.image = image
+                        }
                     }
                 }
-            } else if pkt!.pointee.stream_index == audioStreamIndex {
-                avcodec_send_packet(audioCodecCtx, pkt)
-                while avcodec_receive_frame(audioCodecCtx, frame) == 0 {
-                    // 这里拿 PCM 数据
-                    let pcmBuffer = AVAudioPCMBuffer(pcmFormat: audioFormat, frameCapacity: AVAudioFrameCount(frame!.pointee.nb_samples))!
-                    pcmBuffer.frameLength = pcmBuffer.frameCapacity
-                    // 将 frame!.pointee.data[0] 复制到 pcmBuffer.floatChannelData
-                    // 省略细节，实际需要 swr_convert 转码为 float32
-                    // 然后播放
-                    // audioPlayerNode.scheduleBuffer(pcmBuffer)
-                }
             }
-            av_packet_unref(pkt)
+            av_packet_unref(packet)
         }
-
-        // 清理
+        
+        // 释放资源
         av_frame_free(&frame)
-        av_packet_free(&pkt)
+        av_packet_free(&packet)
         sws_freeContext(swsCtx)
         avcodec_free_context(&videoCodecCtx)
-        avcodec_free_context(&audioCodecCtx)
         avformat_close_input(&fmtCtx)
+        buffer.deallocate()
     }
 }
