@@ -15,7 +15,6 @@ class ViewController: UIViewController {
         tv.layer.borderColor = UIColor.gray.cgColor
         tv.layer.borderWidth = 1
         tv.layer.cornerRadius = 8
-        //默认只支持http，如果要支持https需要加入配置重新打包FFmpeg
         tv.text = "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8"
         return tv
     }()
