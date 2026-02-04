@@ -16,7 +16,7 @@ class ViewController: UIViewController {
         tv.layer.borderWidth = 1
         tv.layer.cornerRadius = 8
         //默认只支持http，如果要支持https需要加入配置重新打包FFmpeg
-        tv.text = "http://devimages.apple.com/iphone/samples/bipbop/bipbopall.m3u8"
+        tv.text = "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8"
         return tv
     }()
 
@@ -56,7 +56,7 @@ class ViewController: UIViewController {
     }
 
     @objc func confirmTapped() {
-        let ffmpegVC = FFmpegPlayerViewController()
+        let ffmpegVC = FFmpegSampleBufferPlayerViewController()
         ffmpegVC.urlString = textView.text
         self.present(ffmpegVC, animated: true)
     }
