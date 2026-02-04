@@ -1,14 +1,7 @@
 import UIKit
 import AVFoundation
 
-// 你需要确保 Bridging-Header 已经引入 FFmpeg：
-/*
- #include "libavformat/avformat.h"
- #include "libavcodec/avcodec.h"
- #include "libswscale/swscale.h"
- #include "libavutil/imgutils.h"
-*/
-
+//直接使用image显示每张画面
 class FFmpegPlayerViewController: UIViewController {
     
     var urlString: String!
