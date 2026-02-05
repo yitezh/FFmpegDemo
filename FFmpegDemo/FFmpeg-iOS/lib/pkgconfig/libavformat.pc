@@ -1,0 +1,14 @@
+prefix=/Users/marine/ffmpeg/FFmpeg-iOS-build-script/ffmpeg/thin/arm64
+exec_prefix=${prefix}
+libdir=/Users/marine/ffmpeg/FFmpeg-iOS-build-script/ffmpeg/thin/arm64/lib
+includedir=/Users/marine/ffmpeg/FFmpeg-iOS-build-script/ffmpeg/thin/arm64/include
+
+Name: libavformat
+Description: FFmpeg container format library
+Version: 59.27.100
+Requires: libavcodec >= 59.37.100, libswresample >= 4.7.100, libavutil >= 57.28.100
+Requires.private: 
+Conflicts:
+Libs: -L${libdir}  -lavformat -lm -lbz2 -lz -Wl,-framework,CoreFoundation -Wl,-framework,Security
+Libs.private: 
+Cflags: -I${includedir}

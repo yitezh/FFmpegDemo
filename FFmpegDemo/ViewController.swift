@@ -31,6 +31,7 @@ class ViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        
         view.backgroundColor = .white
 
         view.addSubview(textView)
@@ -55,7 +56,7 @@ class ViewController: UIViewController {
     }
 
     @objc func confirmTapped() {
-        let ffmpegVC = FFmpegSampleBufferPlayerViewController()
+        let ffmpegVC = FFmpegVTPlayerViewController()
         ffmpegVC.urlString = textView.text
         self.present(ffmpegVC, animated: true)
     }

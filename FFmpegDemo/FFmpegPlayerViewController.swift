@@ -1,7 +1,7 @@
 import UIKit
 import AVFoundation
 
-//直接使用image显示每张画面
+//直接使用image显示每张画面，视频一大就OOM
 class FFmpegPlayerViewController: UIViewController {
     
     var urlString: String!
