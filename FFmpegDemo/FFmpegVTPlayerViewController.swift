@@ -1,8 +1,3 @@
-//
-//  FFmpegVTPlayerViewController.swift
-//  FFmpegDemo
-//
-
 import UIKit
 import AVFoundation
 import VideoToolbox
@@ -18,9 +13,11 @@ class FFmpegVTPlayerViewController: UIViewController {
     private var codecCtx: UnsafeMutablePointer<AVCodecContext>?
     private var videoStreamIndex: Int32 = -1
     private var videoStream: UnsafeMutablePointer<AVStream>?
-
     private var hwDeviceCtx: UnsafeMutablePointer<AVBufferRef>?
-    private var lastPTS: CMTime = .zero
+
+    // 播放起始时间
+    private var playbackStartTime: CFAbsoluteTime = 0
+    private var firstPTS: CMTime = .zero
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -117,7 +114,7 @@ private extension FFmpegVTPlayerViewController {
             print("⚠️ VideoToolbox hwdevice create failed, will use software decode")
         }
 
-        // 设置 get_format 回调，确保选择 VT 硬解
+        // 硬解选择回调
         codecCtx.pointee.get_format = { ctx, pixFmtsOpt in
             guard let pixFmts = pixFmtsOpt else { return AV_PIX_FMT_NONE }
             var p = pixFmts
@@ -140,8 +137,8 @@ private extension FFmpegVTPlayerViewController {
         guard let codecCtx = codecCtx,
               let videoStream = videoStream else { return }
 
-        var packet = av_packet_alloc()
-        var frame = av_frame_alloc()
+        var packet: UnsafeMutablePointer<AVPacket>? = av_packet_alloc()
+        var frame: UnsafeMutablePointer<AVFrame>? = av_frame_alloc()
         guard let packetUnwrapped = packet, let frameUnwrapped = frame else { return }
 
         while av_read_frame(formatCtx, packetUnwrapped) >= 0 {
@@ -149,46 +146,59 @@ private extension FFmpegVTPlayerViewController {
                 avcodec_send_packet(codecCtx, packetUnwrapped)
                 while avcodec_receive_frame(codecCtx, frameUnwrapped) == 0 {
 
-                    let pixFmt = frameUnwrapped.pointee.format
-                    if frameUnwrapped.pointee.format == AV_PIX_FMT_VIDEOTOOLBOX.rawValue {
+                    guard frameUnwrapped.pointee.format == AV_PIX_FMT_VIDEOTOOLBOX.rawValue,
+                          let cvPixelBufferPtr = frameUnwrapped.pointee.data.3 else { continue }
 
-                        // 拿到 CVPixelBuffer
-                        let cvPixelBuffer = Unmanaged<CVPixelBuffer>.fromOpaque(frameUnwrapped.pointee.data.3!).takeUnretainedValue()
-                        let pts = frameUnwrapped.pointee.best_effort_timestamp
-                        let timeBase = videoStream.pointee.time_base
-                        let ptsSec = (pts == Int64(bitPattern: 0x8000000000000000)) ? 0 : Double(pts) * av_q2d(timeBase)
-                        var presentationTime = CMTime(seconds: ptsSec, preferredTimescale: 600)
-                        if presentationTime <= lastPTS {
-                            presentationTime = lastPTS + CMTime(value: 1, timescale: 600)
-                        }
-                        lastPTS = presentationTime
+                    let cvPixelBuffer = Unmanaged<CVPixelBuffer>.fromOpaque(cvPixelBufferPtr).takeUnretainedValue()
 
-                        // CMSampleBuffer
-                        var timing = CMSampleTimingInfo(duration: .invalid,
-                                                        presentationTimeStamp: presentationTime,
-                                                        decodeTimeStamp: .invalid)
-                        var sampleBuffer: CMSampleBuffer?
-                        var formatDesc: CMVideoFormatDescription?
-                        CMVideoFormatDescriptionCreateForImageBuffer(allocator: kCFAllocatorDefault,
-                                                                     imageBuffer: cvPixelBuffer,
-                                                                     formatDescriptionOut: &formatDesc)
-                        if let desc = formatDesc {
-                            CMSampleBufferCreateForImageBuffer(allocator: kCFAllocatorDefault,
-                                                               imageBuffer: cvPixelBuffer,
-                                                               dataReady: true,
-                                                               makeDataReadyCallback: nil,
-                                                               refcon: nil,
-                                                               formatDescription: desc,
-                                                               sampleTiming: &timing,
-                                                               sampleBufferOut: &sampleBuffer)
-                        }
+                    // 使用帧的 PTS
+                    let pts = frameUnwrapped.pointee.best_effort_timestamp
+                    let timeBase = videoStream.pointee.time_base
+                    let ptsSec = (pts == Int64(bitPattern: 0x8000000000000000)) ? 0 : Double(pts) * av_q2d(timeBase)
+                    let presentationTime = CMTime(seconds: ptsSec, preferredTimescale: 600)
 
-                        if let sb = sampleBuffer {
-                            DispatchQueue.main.async { [weak self] in
-                                guard let self else { return }
-                                if self.displayLayer.isReadyForMoreMediaData {
-                                    self.displayLayer.enqueue(sb)
-                                }
+                    // 记录第一帧的 PTS，作为时间基准
+                    if firstPTS == .zero {
+                        firstPTS = presentationTime
+                        playbackStartTime = CFAbsoluteTimeGetCurrent()
+                    }
+
+                    // 计算延迟显示
+                    let elapsed = CFAbsoluteTimeGetCurrent() - playbackStartTime
+                    let delay = CMTimeGetSeconds(presentationTime - firstPTS) - elapsed
+                    if delay > 0 {
+                        Thread.sleep(forTimeInterval: delay)
+                    }
+
+                    // CMSampleBuffer
+                    var formatDesc: CMVideoFormatDescription?
+                    CMVideoFormatDescriptionCreateForImageBuffer(
+                        allocator: kCFAllocatorDefault,
+                        imageBuffer: cvPixelBuffer,
+                        formatDescriptionOut: &formatDesc
+                    )
+                    guard let desc = formatDesc else { continue }
+
+                    var timing = CMSampleTimingInfo(duration: .invalid,
+                                                    presentationTimeStamp: presentationTime,
+                                                    decodeTimeStamp: .invalid)
+                    var sampleBuffer: CMSampleBuffer?
+                    CMSampleBufferCreateForImageBuffer(
+                        allocator: kCFAllocatorDefault,
+                        imageBuffer: cvPixelBuffer,
+                        dataReady: true,
+                        makeDataReadyCallback: nil,
+                        refcon: nil,
+                        formatDescription: desc,
+                        sampleTiming: &timing,
+                        sampleBufferOut: &sampleBuffer
+                    )
+
+                    if let sb = sampleBuffer {
+                        DispatchQueue.main.async { [weak self] in
+                            guard let self else { return }
+                            if self.displayLayer.isReadyForMoreMediaData {
+                                self.displayLayer.enqueue(sb)
                             }
                         }
                     }
