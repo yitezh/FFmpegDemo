@@ -43,7 +43,7 @@ class ViewController: UIViewController {
 
     let button3: UIButton = {
         let btn = UIButton(type: .system)
-        btn.setTitle("FFmpeg+FFVideoToolBox+时间对其", for: .normal)
+        btn.setTitle("FFmpeg+VideoToolBox+时间对其", for: .normal)
         btn.titleLabel?.font = UIFont.boldSystemFont(ofSize: 16)
         btn.backgroundColor = .systemOrange
         btn.titleLabel?.adjustsFontSizeToFitWidth = true
