@@ -92,7 +92,7 @@ class ViewController: UIViewController {
         button2.addTarget(self, action: #selector(openVC2), for: .touchUpInside)
         button3.addTarget(self, action: #selector(openVC3), for: .touchUpInside)
     }
-
+    
     @objc func openVC1() {
         let vc = FFmpegPlayerViewController()
         vc.urlString = textView.text
@@ -107,7 +107,7 @@ class ViewController: UIViewController {
 
     @objc func openVC3() {
         let vc = FFmpegVTPlayerViewController() 
-        vc.urlString = "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8"
+        vc.urlString = textView.text
         present(vc, animated: true)
     }
 }

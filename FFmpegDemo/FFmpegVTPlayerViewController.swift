@@ -44,6 +44,7 @@ class FFmpegVTPlayerViewController: UIViewController {
 
     private var isPlaying = true
     private var threadsStarted = false
+    private var isBuffering = false  // 缓冲状态
 
     // 线程退出信号
     private let demuxDone = DispatchSemaphore(value: 0)
@@ -153,6 +154,9 @@ private extension FFmpegVTPlayerViewController {
             self.openInput()
             self.setupAudioOutput()
             self.threadsStarted = true
+
+            // 预缓冲：先读一批数据再开始播放
+            self.prebuffer()
 
             self.videoDecodeQueue.async { [weak self] in
                 self?.videoDecodeLoop()
@@ -437,10 +441,9 @@ private extension FFmpegVTPlayerViewController {
 
         guard !variants.isEmpty else { return nil }
 
-        // 按带宽排序，选中间偏下的 variant（兼顾画质和网络）
+        // 按带宽排序，选最低码率（优先保证流畅）
         variants.sort { $0.bandwidth < $1.bandwidth }
-        let idx = max(0, variants.count / 3)
-        let selected = variants[idx]
+        let selected = variants[0]
 
         print("ℹ️ HLS: \(variants.count) variants, selected bandwidth=\(selected.bandwidth), url=\(selected.url)")
         return selected.url
@@ -460,7 +463,6 @@ private extension FFmpegVTPlayerViewController {
     func demuxLoop() {
         var packet: UnsafeMutablePointer<AVPacket>? = av_packet_alloc()
         guard let pkt = packet else { return }
-        var readCount = 0
         while isPlaying && av_read_frame(formatCtx, pkt) >= 0 {
             if pkt.pointee.stream_index == videoStreamIndex {
                 videoPacketQueue.enqueue(pkt)
@@ -468,15 +470,29 @@ private extension FFmpegVTPlayerViewController {
                 audioPacketQueue.enqueue(pkt)
             }
             av_packet_unref(pkt)
-            readCount += 1
-            if readCount % 100 == 0 {
-                print("📦 demux: \(readCount) packets, vQ=\(videoPacketQueue.count) aQ=\(audioPacketQueue.count)")
-            }
         }
-        print("📦 demux ended after \(readCount) packets")
         videoPacketQueue.markFinished()
         audioPacketQueue.markFinished()
         av_packet_free(&packet)
+    }
+
+    /// 预缓冲：读取一批 packet 到队列后再开始播放
+    func prebuffer() {
+        var packet: UnsafeMutablePointer<AVPacket>? = av_packet_alloc()
+        guard let pkt = packet else { return }
+        let targetPackets = 120 // 约 4 秒的数据
+        var count = 0
+        while isPlaying && count < targetPackets && av_read_frame(formatCtx, pkt) >= 0 {
+            if pkt.pointee.stream_index == videoStreamIndex {
+                videoPacketQueue.enqueue(pkt)
+                count += 1
+            } else if pkt.pointee.stream_index == audioStreamIndex {
+                audioPacketQueue.enqueue(pkt)
+            }
+            av_packet_unref(pkt)
+        }
+        av_packet_free(&packet)
+        print("ℹ️ prebuffered \(count) video packets, vQ=\(videoPacketQueue.count) aQ=\(audioPacketQueue.count)")
     }
 }
 
@@ -486,6 +502,12 @@ private extension FFmpegVTPlayerViewController {
     func videoDecodeLoop() {
         var frame: UnsafeMutablePointer<AVFrame>? = av_frame_alloc()
         guard let frm = frame else { return }
+        var frameCount = 0
+
+        // 缓冲阈值
+        let bufferLowThreshold = 3     // 低于此值进入缓冲
+        let bufferHighThreshold = 30   // 高于此值恢复播放
+
         while let dequeuedPkt = videoPacketQueue.dequeue() {
             var pkt: UnsafeMutablePointer<AVPacket>? = dequeuedPkt
             guard let ctx = codecCtx, let vStream = videoStream else {
@@ -493,7 +515,6 @@ private extension FFmpegVTPlayerViewController {
                 continue
             }
             avcodec_send_packet(ctx, pkt)
-            var frameCount = 0
             while avcodec_receive_frame(ctx, frm) == 0 {
                 var pixelBuffer: CVPixelBuffer?
 
@@ -511,27 +532,35 @@ private extension FFmpegVTPlayerViewController {
                 let presentationTime = CMTime(seconds: ptsSec, preferredTimescale: 600)
 
                 frameCount += 1
-                if frameCount % 90 == 1 {
-                    let aClock = getAudioClockSec()
-                    let aReady = audioClockReady
-                    let pcmSize: Int = { self.audioDataLock.lock(); let s = self.audioPCMData.count; self.audioDataLock.unlock(); return s }()
-                    print("🎬 vPTS=\(String(format: "%.3f", ptsSec)) aClock=\(String(format: "%.3f", aClock)) aReady=\(aReady) pcm=\(pcmSize) vQ=\(videoPacketQueue.count) aQ=\(audioPacketQueue.count)")
+
+                // 缓冲状态机：队列不够时暂停等数据，够了再继续
+                let vqCount = videoPacketQueue.count
+                if !isBuffering && vqCount < bufferLowThreshold {
+                    isBuffering = true
+                    // 重置音频时钟，恢复后重新同步
+                    audioClockLock.lock()
+                    audioClockReady = false
+                    audioClockLock.unlock()
+                    firstVideoPTSSec = -1
+                }
+                if isBuffering {
+                    while isPlaying && videoPacketQueue.count < bufferHighThreshold {
+                        usleep(10_000) // 10ms
+                    }
+                    // 恢复播放，重置时间基准
+                    isBuffering = false
+                    firstVideoPTSSec = ptsSec
+                    playbackStartTime = CFAbsoluteTimeGetCurrent()
                 }
 
-                // 同步策略
+                // 同步
                 if audioClockReady {
-                    // 检查音频是否断流（PCM 耗尽且音频时钟停滞）
                     let aClock = getAudioClockSec()
                     let delay = ptsSec - aClock
 
-                    if delay > 0.005 && delay < 0.5 {
-                        // 正常范围：视频超前音频，等一下
-                        Thread.sleep(forTimeInterval: delay)
-                    } else if delay >= 0.5 {
-                        // 视频远超音频 → 音频可能断流了，不等，直接送显
-                        // 不做任何等待
-                    } else if delay < -0.1 {
-                        // 视频落后音频，丢帧追赶
+                    if delay > 0.003 && delay < 0.5 {
+                        usleep(UInt32(delay * 1_000_000))
+                    } else if delay < -0.05 {
                         continue
                     }
                 } else {
@@ -540,8 +569,8 @@ private extension FFmpegVTPlayerViewController {
                         playbackStartTime = CFAbsoluteTimeGetCurrent()
                     }
                     let delay = (ptsSec - firstVideoPTSSec) - (CFAbsoluteTimeGetCurrent() - playbackStartTime)
-                    if delay > 0.005 && delay < 2.0 {
-                        Thread.sleep(forTimeInterval: delay)
+                    if delay > 0.003 && delay < 2.0 {
+                        usleep(UInt32(delay * 1_000_000))
                     }
                 }
 
